@@ -35,6 +35,22 @@ _STATUS_EVENT_TYPES = {
     'LONG_SERVE_START_SUCCESS',
     'LONG_SERVE_CLOSE',
 }
+_LEGACY_MESSAGE_TYPES = {
+    1: 'TEXT',
+    3: 'IMAGE',
+    34: 'VOICE',
+    42: 'CARD',
+    43: 'VIDEO',
+    47: 'EMOJI',
+    48: 'LOCATION',
+}
+_LEGACY_APP_MESSAGE_TYPES = {
+    '5': 'LINK',
+    '6': 'FILE',
+    '33': 'MINI_PROGRAM',
+    '36': 'MINI_PROGRAM',
+    '57': 'QUOTE',
+}
 
 
 class GeWeV2ApiError(RuntimeError):
@@ -236,6 +252,60 @@ def _xml_text(root: ET.Element | None, path: str, default: str = '') -> str:
     return (root.findtext(path) or default).strip()
 
 
+def _legacy_string(value: typing.Any) -> str:
+    if isinstance(value, dict):
+        return _as_text(value.get('string'))
+    return _as_text(value)
+
+
+def _legacy_message_type(data: dict, content: str) -> str:
+    msg_type = _integer(data.get('MsgType'), -1)
+    if msg_type != 49:
+        return _LEGACY_MESSAGE_TYPES.get(msg_type, f'LEGACY_{msg_type}')
+
+    _, xml_content = _group_prefix(content)
+    root = _xml_root(xml_content)
+    app_type = _xml_text(root, './/appmsg/type')
+    return _LEGACY_APP_MESSAGE_TYPES.get(app_type, 'APP_MSG')
+
+
+def _legacy_mention_ids(msg_source: str) -> list[str]:
+    root = _xml_root(msg_source)
+    raw_ids = _xml_text(root, './/atuserlist')
+    if not raw_ids:
+        return []
+    return [item.strip() for item in re.split(r'[,;]', raw_ids) if item.strip()]
+
+
+def _normalize_callback_payload(payload: dict) -> dict:
+    """Normalize the legacy AddMsg envelope sometimes returned by the v2 callback endpoint."""
+    data = payload.get('Data')
+    if str(payload.get('TypeName') or '').upper() != 'ADDMSG' or not isinstance(data, dict):
+        return payload
+
+    account_id = str(payload.get('Wxid') or '')
+    from_user = _legacy_string(data.get('FromUserName'))
+    content = _legacy_string(data.get('Content'))
+    group_sender, _ = _group_prefix(content) if from_user.endswith('@chatroom') else (None, content)
+    msg_source = _legacy_string(data.get('MsgSource'))
+
+    return {
+        'appid': str(payload.get('Appid') or ''),
+        'wxid': account_id,
+        'msgType': _legacy_message_type(data, content),
+        'content': content,
+        'createTime': data.get('CreateTime'),
+        'fromUser': from_user,
+        'toUser': _legacy_string(data.get('ToUserName')),
+        'msgId': data.get('MsgId'),
+        'newMsgId': data.get('NewMsgId'),
+        'isSelf': bool(account_id and (from_user == account_id or group_sender == account_id)),
+        'atUserList': _legacy_mention_ids(msg_source),
+        'pushContent': _legacy_string(data.get('PushContent')),
+        '_callbackFormat': 'legacy-addmsg',
+    }
+
+
 def _group_prefix(content: str) -> tuple[str | None, str]:
     match = re.match(r'^([A-Za-z0-9_@.\-]{3,80}):\s*(?:\n)?(.*)$', content, re.S)
     if not match:
@@ -304,7 +374,10 @@ class GeWeV2MessageConverter(abstract_platform_adapter.AbstractMessageConverter)
         content = _as_text(payload.get('content'))
         group_id, sender_id, clean_content = self._group_info(payload, content)
         components: list[platform_message.MessageComponent] = [
-            platform_message.Source(id=str(payload.get('newMsgId') or payload.get('msgId') or ''), time=datetime.datetime.fromtimestamp(_timestamp(payload.get('createTime'))))
+            platform_message.Source(
+                id=str(payload.get('newMsgId') or payload.get('msgId') or ''),
+                time=datetime.datetime.fromtimestamp(_timestamp(payload.get('createTime'))),
+            )
         ]
         if group_id:
             components.extend(self._message_mentions(payload, clean_content, bot_account_id))
@@ -316,7 +389,9 @@ class GeWeV2MessageConverter(abstract_platform_adapter.AbstractMessageConverter)
             components.append(platform_message.Plain(text=text))
         elif msg_type == 'IMAGE':
             url = await self._safe_download(self.client.download_image(self.config['app_id'], clean_content))
-            components.append(platform_message.Image(url=url) if url else platform_message.Unknown(text='[GeWe 图片下载失败]'))
+            components.append(
+                platform_message.Image(url=url) if url else platform_message.Unknown(text='[GeWe 图片下载失败]')
+            )
             components.append(platform_message.WeChatForwardImage(xml_data=clean_content))
         elif msg_type == 'VOICE':
             url = await self._safe_download(
@@ -327,10 +402,18 @@ class GeWeV2MessageConverter(abstract_platform_adapter.AbstractMessageConverter)
             if root is not None:
                 voice = root.find('.//voicemsg')
                 duration_ms = _integer(voice.get('voicelength', '0') if voice is not None else '0')
-            components.append(platform_message.Voice(url=url, length=max(0, round(duration_ms / 1000))) if url else platform_message.Unknown(text='[GeWe 语音下载失败]'))
+            components.append(
+                platform_message.Voice(url=url, length=max(0, round(duration_ms / 1000)))
+                if url
+                else platform_message.Unknown(text='[GeWe 语音下载失败]')
+            )
         elif msg_type == 'VIDEO':
             url = await self._safe_download(self.client.download_video(self.config['app_id'], clean_content))
-            components.append(platform_message.File(name='video.mp4', url=url) if url else platform_message.Unknown(text='[GeWe 视频下载失败]'))
+            components.append(
+                platform_message.File(name='video.mp4', url=url)
+                if url
+                else platform_message.Unknown(text='[GeWe 视频下载失败]')
+            )
         elif msg_type == 'EMOJI':
             root = _xml_root(clean_content)
             emoji = root.find('.//emoji') if root is not None else None
@@ -349,7 +432,11 @@ class GeWeV2MessageConverter(abstract_platform_adapter.AbstractMessageConverter)
                 ext = _xml_text(appmsg, './/appattach/fileext', '')
                 if ext and '.' not in name:
                     name = f'{name}.{ext}'
-            components.append(platform_message.File(name=name, url=file_url) if file_url else platform_message.WeChatForwardFile(xml_data=clean_content))
+            components.append(
+                platform_message.File(name=name, url=file_url)
+                if file_url
+                else platform_message.WeChatForwardFile(xml_data=clean_content)
+            )
         elif msg_type == 'LINK':
             root = _xml_root(clean_content)
             components.append(
@@ -376,7 +463,11 @@ class GeWeV2MessageConverter(abstract_platform_adapter.AbstractMessageConverter)
         elif msg_type == 'CARD':
             components.append(platform_message.Unknown(text=f'[GeWe 名片消息] {clean_content}'))
         else:
-            components.append(platform_message.Unknown(text=f'[GeWe v2 未支持消息类型: {msg_type or "UNKNOWN"}] {clean_content[:500]}'))
+            components.append(
+                platform_message.Unknown(
+                    text=f'[GeWe v2 未支持消息类型: {msg_type or "UNKNOWN"}] {clean_content[:500]}'
+                )
+            )
 
         if group_id:
             group = platform_entities.Group(
@@ -453,7 +544,9 @@ class GeWeV2Adapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
         prefix = 'http://127.0.0.1:5300'
         ap = getattr(self.logger, 'ap', None)
         if ap is not None:
-            prefix = str(getattr(getattr(ap, 'instance_config', None), 'data', {}).get('api', {}).get('webhook_prefix', prefix))
+            prefix = str(
+                getattr(getattr(ap, 'instance_config', None), 'data', {}).get('api', {}).get('webhook_prefix', prefix)
+            )
         return f'{prefix.rstrip("/")}/bots/{self._bot_uuid}/{self._webhook_path()}'
 
     def get_launcher_id(self, event: platform_events.MessageEvent) -> str:
@@ -524,6 +617,7 @@ class GeWeV2Adapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
             return quart.jsonify({'ret': 400, 'msg': 'invalid JSON'}), 400
         if not isinstance(payload, dict):
             return quart.jsonify({'ret': 400, 'msg': 'JSON object required'}), 400
+        payload = _normalize_callback_payload(payload)
         app_id = str(payload.get('appid') or '')
         configured_app_id = str(self.config.get('app_id') or '')
         if app_id and app_id != configured_app_id:
@@ -591,25 +685,43 @@ class GeWeV2Adapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
                 await self._client.post_image(self.config['app_id'], target_id, self._require_url(component, '图片'))
             elif isinstance(component, platform_message.File):
                 await flush_at('')
-                await self._client.post_file(self.config['app_id'], target_id, self._require_url(component, '文件'), component.name or 'file')
+                await self._client.post_file(
+                    self.config['app_id'], target_id, self._require_url(component, '文件'), component.name or 'file'
+                )
             elif isinstance(component, platform_message.Voice):
                 await flush_at('')
                 await self._client.post_voice(
-                    self.config['app_id'], target_id, self._require_url(component, '语音'), int(component.length or 0) * 1000
+                    self.config['app_id'],
+                    target_id,
+                    self._require_url(component, '语音'),
+                    int(component.length or 0) * 1000,
                 )
             elif isinstance(component, platform_message.WeChatLink):
                 await flush_at('')
                 await self._client.post_link(
-                    self.config['app_id'], target_id, component.link_title, component.link_desc, component.link_url, component.link_thumb_url
+                    self.config['app_id'],
+                    target_id,
+                    component.link_title,
+                    component.link_desc,
+                    component.link_url,
+                    component.link_thumb_url,
                 )
             elif isinstance(component, platform_message.WeChatEmoji):
                 await flush_at('')
-                await self._client.post_emoji(self.config['app_id'], target_id, component.emoji_md5, component.emoji_size)
+                await self._client.post_emoji(
+                    self.config['app_id'], target_id, component.emoji_md5, component.emoji_size
+                )
             elif isinstance(component, platform_message.WeChatMiniPrograms):
                 await flush_at('')
                 await self._client.post_mini_app(
-                    self.config['app_id'], target_id, component.mini_app_id, component.display_name or '', component.page_path or '',
-                    component.image_url or '', component.title or '', component.user_name,
+                    self.config['app_id'],
+                    target_id,
+                    component.mini_app_id,
+                    component.display_name or '',
+                    component.page_path or '',
+                    component.image_url or '',
+                    component.title or '',
+                    component.user_name,
                 )
             elif isinstance(component, platform_message.WeChatAppMsg):
                 await flush_at('')
@@ -628,7 +740,13 @@ class GeWeV2Adapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
                 await self._client.forward('Url', self.config['app_id'], target_id, component.xml_data)
             elif isinstance(component, platform_message.WeChatForwardMiniPrograms):
                 await flush_at('')
-                await self._client.forward('MiniApp', self.config['app_id'], target_id, component.xml_data, coverImgUrl=component.image_url or '')
+                await self._client.forward(
+                    'MiniApp',
+                    self.config['app_id'],
+                    target_id,
+                    component.xml_data,
+                    coverImgUrl=component.image_url or '',
+                )
             elif isinstance(component, platform_message.Unknown):
                 await flush_at(component.text)
             else:
@@ -638,12 +756,21 @@ class GeWeV2Adapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
     async def send_message(self, target_type: str, target_id: str, message: platform_message.MessageChain):
         await self._send_chain(str(target_id), message)
 
-    async def reply_message(self, message_source: platform_events.MessageEvent, message: platform_message.MessageChain, quote_origin: bool = False):
+    async def reply_message(
+        self,
+        message_source: platform_events.MessageEvent,
+        message: platform_message.MessageChain,
+        quote_origin: bool = False,
+    ):
         target_id = ''
         if isinstance(message_source.source_platform_object, dict):
             target_id = str(message_source.source_platform_object.get('_target_id') or '')
         if not target_id:
-            target_id = str(message_source.sender.group.id if isinstance(message_source, platform_events.GroupMessage) else message_source.sender.id)
+            target_id = str(
+                message_source.sender.group.id
+                if isinstance(message_source, platform_events.GroupMessage)
+                else message_source.sender.id
+            )
         await self._send_chain(target_id, message)
 
     async def is_muted(self, group_id: int) -> bool:

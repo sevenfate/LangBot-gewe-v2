@@ -75,6 +75,42 @@ async def test_v2_text_and_group_mentions_are_converted():
 
 
 @pytest.mark.asyncio
+async def test_legacy_addmsg_group_mention_is_normalized_and_converted():
+    payload = {
+        'Wxid': 'wxid_bot',
+        'TypeName': 'AddMsg',
+        'Appid': 'app',
+        'Data': {
+            'MsgId': 1001,
+            'FromUserName': {'string': 'room@chatroom'},
+            'ToUserName': {'string': 'wxid_bot'},
+            'MsgType': 1,
+            'Content': {'string': 'wxid_user:\n@群机器人 !天气 上海'},
+            'CreateTime': 1700000000,
+            'MsgSource': '<msgsource><atuserlist>wxid_bot</atuserlist><membercount>3</membercount></msgsource>',
+            'NewMsgId': 1002,
+        },
+    }
+
+    normalized = gewechat_v2._normalize_callback_payload(payload)
+
+    assert normalized['appid'] == 'app'
+    assert normalized['wxid'] == 'wxid_bot'
+    assert normalized['msgType'] == 'TEXT'
+    assert normalized['atUserList'] == ['wxid_bot']
+    assert normalized['isSelf'] is False
+
+    converter = gewechat_v2.GeWeV2MessageConverter({'app_id': 'app'}, FakeDownloadClient())
+    event = await converter.target2yiri(normalized, 'wxid_bot')
+
+    assert isinstance(event, platform_events.GroupMessage)
+    assert event.sender.id == 'wxid_user'
+    assert event.sender.group.id == 'room@chatroom'
+    assert any(isinstance(item, platform_message.At) and item.target == 'wxid_bot' for item in event.message_chain)
+    assert event.message_chain.get_first(platform_message.Plain).text == '!天气 上海'
+
+
+@pytest.mark.asyncio
 async def test_v2_media_download_and_unknown_type_are_safe():
     converter = gewechat_v2.GeWeV2MessageConverter({'app_id': 'app'}, FakeDownloadClient())
     image = await converter.target2yiri(
@@ -173,6 +209,44 @@ async def test_unified_webhook_returns_quickly_and_deduplicates():
     assert invalid_path[1] == 404
     converter.target2yiri.assert_awaited_once()
     assert adapter.callback_url().endswith('/bots/bot-uuid/gewe/path-secret')
+
+
+@pytest.mark.asyncio
+async def test_unified_webhook_dispatches_legacy_addmsg_payload():
+    converter = SimpleNamespace(target2yiri=AsyncMock(return_value=None))
+    adapter = gewechat_v2.GeWeV2Adapter.model_construct(
+        config={'app_id': 'app'},
+        logger=SimpleNamespace(),
+        bot_account_id='',
+        listeners={},
+        _bot_uuid='bot-uuid',
+        _converter=converter,
+        _client=SimpleNamespace(),
+        _inbound_tasks=set(),
+        _dedup={},
+    )
+
+    class Request:
+        async def get_data(self):
+            return (
+                b'{"Wxid":"wxid_bot","TypeName":"AddMsg","Appid":"app","Data":{'
+                b'"MsgId":1001,"FromUserName":{"string":"room@chatroom"},'
+                b'"ToUserName":{"string":"wxid_bot"},"MsgType":1,'
+                b'"Content":{"string":"wxid_user:\\n@bot test"},"CreateTime":1700000000,'
+                b'"MsgSource":"<msgsource><atuserlist>wxid_bot</atuserlist></msgsource>",'
+                b'"NewMsgId":1002}}'
+            )
+
+    app = Quart(__name__)
+    async with app.app_context():
+        response = await adapter.handle_unified_webhook('bot-uuid', 'gewe', Request())
+
+    await asyncio.sleep(0)
+    assert response[1] == 200
+    assert adapter.bot_account_id == 'wxid_bot'
+    normalized = converter.target2yiri.await_args.args[0]
+    assert normalized['msgType'] == 'TEXT'
+    assert normalized['atUserList'] == ['wxid_bot']
 
 
 @pytest.mark.asyncio
