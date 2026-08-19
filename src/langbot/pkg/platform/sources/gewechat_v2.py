@@ -23,6 +23,8 @@ _MAX_INBOUND_BODY = 4 * 1024 * 1024
 _MAX_INBOUND_TASKS = 256
 _DEDUP_TTL_SECONDS = 6 * 60 * 60
 _DEDUP_MAX_ENTRIES = 8192
+_MEMBER_NAME_CACHE_TTL_SECONDS = 10 * 60
+_MEMBER_NAME_CACHE_MAX_ENTRIES = 2048
 _DEFAULT_API_BASE_URL = 'http://api.geweapi.com'
 _STATUS_EVENT_TYPES = {
     'RECONNECT_SUCCESS',
@@ -91,6 +93,17 @@ class GeWeV2Client:
         return await self.post(
             'message/postText',
             {'appId': app_id, 'toWxid': to_wxid, 'content': content, 'ats': ats},
+        )
+
+    async def get_chatroom_member_detail(
+        self,
+        app_id: str,
+        chatroom_id: str,
+        member_wxids: list[str],
+    ) -> dict:
+        return await self.post(
+            'group/getChatroomMemberDetail',
+            {'appId': app_id, 'chatroomId': chatroom_id, 'memberWxids': member_wxids},
         )
 
     async def post_file(self, app_id: str, to_wxid: str, file_url: str, file_name: str) -> dict:
@@ -515,6 +528,7 @@ class GeWeV2Adapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
     _bot_uuid: str = pydantic.PrivateAttr(default='')
     _inbound_tasks: set[asyncio.Task] = pydantic.PrivateAttr(default_factory=set)
     _dedup: dict[str, float] = pydantic.PrivateAttr(default_factory=dict)
+    _member_name_cache: dict[tuple[str, str], tuple[str, float]] = pydantic.PrivateAttr(default_factory=dict)
 
     def __init__(self, config: dict, logger):
         config = dict(config or {})
@@ -649,6 +663,52 @@ class GeWeV2Adapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
             raise ValueError(f'GeWe v2 {label} 需要公网可访问的 URL')
         return url
 
+    async def _resolve_at_labels(self, chatroom_id: str, wxids: list[str], labels: list[str]) -> list[str]:
+        if not chatroom_id.endswith('@chatroom'):
+            return [label or wxid for wxid, label in zip(wxids, labels)]
+
+        now = asyncio.get_running_loop().time()
+        resolved = list(labels)
+        missing: list[str] = []
+        for index, (wxid, label) in enumerate(zip(wxids, labels)):
+            if label or wxid == 'notify@all':
+                continue
+            cached = self._member_name_cache.get((chatroom_id, wxid))
+            if cached and now - cached[1] <= _MEMBER_NAME_CACHE_TTL_SECONDS:
+                resolved[index] = cached[0]
+            elif wxid not in missing:
+                missing.append(wxid)
+
+        if missing:
+            try:
+                response = await self._client.get_chatroom_member_detail(
+                    self.config['app_id'],
+                    chatroom_id,
+                    missing,
+                )
+                members = response.get('data') or []
+                if isinstance(members, list):
+                    for member in members:
+                        if not isinstance(member, dict):
+                            continue
+                        wxid = str(member.get('userName') or '')
+                        nickname = str(member.get('nickName') or '').strip()
+                        if wxid and nickname:
+                            self._member_name_cache[(chatroom_id, wxid)] = (nickname, now)
+                if len(self._member_name_cache) > _MEMBER_NAME_CACHE_MAX_ENTRIES:
+                    oldest = sorted(self._member_name_cache, key=lambda key: self._member_name_cache[key][1])
+                    for key in oldest[: len(self._member_name_cache) - _MEMBER_NAME_CACHE_MAX_ENTRIES]:
+                        self._member_name_cache.pop(key, None)
+            except Exception as exc:
+                await self.logger.warning(f'GeWe v2 获取群成员昵称失败: {exc}')
+
+        for index, (wxid, label) in enumerate(zip(wxids, resolved)):
+            if label:
+                continue
+            cached = self._member_name_cache.get((chatroom_id, wxid))
+            resolved[index] = cached[0] if cached else wxid
+        return resolved
+
     async def _send_chain(self, target_id: str, message: platform_message.MessageChain) -> None:
         pending_at: list[str] = []
         pending_labels: list[str] = []
@@ -657,7 +717,8 @@ class GeWeV2Adapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
             nonlocal pending_at, pending_labels
             if not text and not pending_at:
                 return
-            prefix = ''.join(f'@{label} ' for label in pending_labels)
+            labels = await self._resolve_at_labels(target_id, pending_at, pending_labels)
+            prefix = ''.join(f'@{label} ' for label in labels)
             await self._client.post_text(
                 self.config['app_id'],
                 target_id,
@@ -676,7 +737,7 @@ class GeWeV2Adapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
                 continue
             if isinstance(component, platform_message.At):
                 pending_at.append(str(component.target))
-                pending_labels.append(str(component.display or component.target))
+                pending_labels.append(str(component.display or ''))
                 continue
             if isinstance(component, platform_message.Plain):
                 await flush_at(component.text)

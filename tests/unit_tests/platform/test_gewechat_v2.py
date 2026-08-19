@@ -167,11 +167,18 @@ async def test_api_client_uses_v2_path_and_token_header(monkeypatch):
 
     client = gewechat_v2.GeWeV2Client('http://api.example', 'secret-token')
     await client.post_text('app', 'wxid_user', 'hello')
+    await client.get_chatroom_member_detail('app', 'room@chatroom', ['wxid_user'])
 
     assert calls[0][0] == 'http://api.example/gewe/v2/api/message/postText'
     assert calls[0][1]['headers']['X-GEWE-TOKEN'] == 'secret-token'
     assert calls[0][1]['json']['appId'] == 'app'
     assert calls[0][1]['json']['toWxid'] == 'wxid_user'
+    assert calls[1][0] == 'http://api.example/gewe/v2/api/group/getChatroomMemberDetail'
+    assert calls[1][1]['json'] == {
+        'appId': 'app',
+        'chatroomId': 'room@chatroom',
+        'memberWxids': ['wxid_user'],
+    }
 
 
 @pytest.mark.asyncio
@@ -278,6 +285,7 @@ async def test_unified_webhook_ignores_another_appid_on_shared_token():
 @pytest.mark.asyncio
 async def test_outbound_text_mentions_use_v2_ats_field_and_voice_uses_milliseconds():
     outbound = SimpleNamespace(
+        get_chatroom_member_detail=AsyncMock(),
         post_text=AsyncMock(),
         post_voice=AsyncMock(),
     )
@@ -310,4 +318,48 @@ async def test_outbound_text_mentions_use_v2_ats_field_and_voice_uses_millisecon
     )
 
     outbound.post_text.assert_awaited_once_with('app', 'room@chatroom', '@小明 你好', 'wxid_user')
+    outbound.get_chatroom_member_detail.assert_not_awaited()
     outbound.post_voice.assert_awaited_once_with('app', 'wxid_user', 'https://media.example/a.silk', 2000)
+
+
+@pytest.mark.asyncio
+async def test_outbound_text_mention_resolves_missing_display_from_chatroom_member():
+    outbound = SimpleNamespace(
+        get_chatroom_member_detail=AsyncMock(
+            return_value={
+                'ret': 200,
+                'data': [{'userName': 'wxid_user', 'nickName': '小明'}],
+            }
+        ),
+        post_text=AsyncMock(),
+    )
+    adapter = gewechat_v2.GeWeV2Adapter.model_construct(
+        config={'app_id': 'app'},
+        logger=SimpleNamespace(warning=AsyncMock()),
+        bot_account_id='wxid_bot',
+        listeners={},
+        _client=outbound,
+        _converter=SimpleNamespace(),
+        _bot_uuid='',
+        _inbound_tasks=set(),
+        _dedup={},
+        _member_name_cache={},
+    )
+    message = platform_message.MessageChain(
+        [
+            platform_message.At(target='wxid_user'),
+            platform_message.Plain(text='未知命令: 天气'),
+        ]
+    )
+
+    await adapter.send_message('group', 'room@chatroom', message)
+    await adapter.send_message('group', 'room@chatroom', message)
+
+    outbound.get_chatroom_member_detail.assert_awaited_once_with('app', 'room@chatroom', ['wxid_user'])
+    assert outbound.post_text.await_count == 2
+    outbound.post_text.assert_awaited_with(
+        'app',
+        'room@chatroom',
+        '@小明 未知命令: 天气',
+        'wxid_user',
+    )
