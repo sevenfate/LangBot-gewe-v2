@@ -241,6 +241,46 @@ class TestBotServiceGetRuntimeBotInfo:
         assert result['adapter_runtime_values']['webhook_url'] == '/bots/wecom-uuid'
         assert result['adapter_runtime_values']['webhook_full_url'] == 'http://127.0.0.1:5300/bots/wecom-uuid'
 
+    async def test_get_runtime_bot_info_returns_gewe_v2_secret_webhook_for_manager(self):
+        """GeWe v2 exposes the configured path secret only to resource managers."""
+        ap = SimpleNamespace()
+        ap.instance_config = SimpleNamespace(data={'api': {'webhook_prefix': 'https://bot.example'}})
+        ap.platform_mgr = SimpleNamespace(get_bot_by_uuid=AsyncMock(return_value=None))
+        service = BotService(ap)
+        service.get_bot = AsyncMock(
+            side_effect=lambda *_args, **_kwargs: {
+                'uuid': 'gewe-uuid',
+                'adapter': 'gewechat-v2',
+                'adapter_config': {'webhook_secret': 'path secret'},
+            }
+        )
+
+        manager_result = await service.get_runtime_bot_info(WORKSPACE_UUID, 'gewe-uuid', include_secret=True)
+        viewer_result = await service.get_runtime_bot_info(WORKSPACE_UUID, 'gewe-uuid', include_secret=False)
+
+        assert manager_result['adapter_runtime_values']['webhook_full_url'] == (
+            'https://bot.example/bots/gewe-uuid/gewe/path%20secret'
+        )
+        assert viewer_result['adapter_runtime_values']['webhook_full_url'] == 'https://bot.example/bots/gewe-uuid/gewe'
+
+    async def test_get_runtime_bot_info_uses_gewe_v2_callback_override(self):
+        """GeWe v2 displays the same callback override that it registers upstream."""
+        ap = SimpleNamespace()
+        ap.instance_config = SimpleNamespace(data={'api': {'webhook_prefix': 'https://bot.example'}})
+        ap.platform_mgr = SimpleNamespace(get_bot_by_uuid=AsyncMock(return_value=None))
+        service = BotService(ap)
+        service.get_bot = AsyncMock(
+            return_value={
+                'uuid': 'gewe-uuid',
+                'adapter': 'gewechat-v2',
+                'adapter_config': {'callback_url': 'https://proxy.example/gewe/callback'},
+            }
+        )
+
+        result = await service.get_runtime_bot_info(WORKSPACE_UUID, 'gewe-uuid', include_secret=True)
+
+        assert result['adapter_runtime_values']['webhook_full_url'] == 'https://proxy.example/gewe/callback'
+
     async def test_get_runtime_bot_info_no_webhook_for_telegram(self):
         """Returns no webhook URL for non-webhook adapters like telegram."""
         # Setup

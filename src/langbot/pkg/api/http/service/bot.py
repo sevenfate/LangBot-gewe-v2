@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 import sqlalchemy
+from urllib.parse import quote
 
 from ....core import app
 from ....entity.persistence import bot as persistence_bot
@@ -80,10 +81,25 @@ class BotService:
             'wecomcs',
             'LINE',
             'lark',
+            'gewechat-v2',
         ]:
             webhook_prefix = self.ap.instance_config.data['api'].get('webhook_prefix', 'http://127.0.0.1:5300')
             extra_webhook_prefix = self.ap.instance_config.data['api'].get('extra_webhook_prefix', '')
             webhook_url = f'/bots/{bot_uuid}'
+            if persistence_bot['adapter'] == 'gewechat-v2':
+                adapter_config = persistence_bot.get('adapter_config') or {}
+                configured_callback = str(adapter_config.get('callback_url') or '').strip() if include_secret else ''
+                if configured_callback:
+                    adapter_runtime_values['webhook_url'] = configured_callback
+                    adapter_runtime_values['webhook_full_url'] = configured_callback
+                    adapter_runtime_values['extra_webhook_full_url'] = ''
+                    persistence_bot['adapter_runtime_values'] = adapter_runtime_values
+                    return persistence_bot
+                webhook_url = f'{webhook_url}/gewe'
+                if include_secret:
+                    webhook_secret = str(adapter_config.get('webhook_secret') or '').strip()
+                    if webhook_secret:
+                        webhook_url = f'{webhook_url}/{quote(webhook_secret, safe="")}'
             adapter_runtime_values['webhook_url'] = webhook_url
             adapter_runtime_values['webhook_full_url'] = f'{webhook_prefix}{webhook_url}'
             adapter_runtime_values['extra_webhook_full_url'] = (

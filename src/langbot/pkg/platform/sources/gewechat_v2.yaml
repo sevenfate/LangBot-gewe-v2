@@ -1,0 +1,119 @@
+apiVersion: v1
+kind: MessagePlatformAdapter
+metadata:
+  name: gewechat-v2
+  label:
+    en_US: GeWe v2 (Personal WeChat)
+    zh_Hans: GeWe v2（个人微信）
+  description:
+    en_US: Personal WeChat adapter based on the GeWe v2 API and webhook protocol.
+    zh_Hans: 基于 GeWe v2 API 和 Webhook 协议的个人微信适配器。使用前请准备 GeWe 后台的 Token、AppId，并把显示的 Webhook 地址配置到 GeWe。
+  icon: legacy/gewechat.png
+spec:
+  categories:
+    - china
+  help_links:
+    zh: https://doc.geweapi.com/
+    en: https://doc.geweapi.com/
+  config:
+    - name: base_url
+      label:
+        en_US: GeWe API Base URL
+        zh_Hans: GeWe API 地址
+      description:
+        en_US: Usually http://api.geweapi.com. Keep /gewe/v2/api out of this value.
+        zh_Hans: 通常填写 http://api.geweapi.com，不要在这里重复填写 /gewe/v2/api。
+      type: string
+      required: true
+      default: http://api.geweapi.com
+    - name: token
+      label:
+        en_US: GeWe Token
+        zh_Hans: GeWe Token（令牌）
+      description:
+        en_US: Token from the GeWe access-control console. It is sent as X-GEWE-TOKEN.
+        zh_Hans: GeWe「访问控制」后台生成的令牌，适配器会通过 X-GEWE-TOKEN 请求头发送。
+      type: string
+      required: true
+      default: ""
+    - name: app_id
+      label:
+        en_US: GeWe AppId
+        zh_Hans: GeWe AppId（设备 ID）
+      description:
+        en_US: The AppId of the logged-in WeChat account.
+        zh_Hans: 已登录微信账号对应的设备 ID。一个 LangBot Bot 建议只绑定一个 AppId。
+      type: string
+      required: true
+      default: ""
+    - name: wxid
+      label:
+        en_US: WeChat Wxid
+        zh_Hans: 微信 Wxid（可选）
+      description:
+        en_US: Optional at startup; v2 callbacks update it automatically.
+        zh_Hans: 可不填；收到第一条 v2 回调后会自动更新为当前微信账号 Wxid。
+      type: string
+      required: false
+      default: ""
+    - name: bot_nickname
+      label:
+        en_US: Bot Nickname
+        zh_Hans: 机器人昵称（可选）
+      description:
+        en_US: Used to recognize @mentions in group messages when GeWe does not provide an ID list.
+        zh_Hans: 当 GeWe 回调没有提供被 @ 用户 ID 列表时，用这个昵称识别群聊中的 @机器人。
+      type: string
+      required: false
+      default: ""
+    - name: webhook_secret
+      label:
+        en_US: Webhook Path Secret
+        zh_Hans: Webhook 路径密钥（可选）
+      description:
+        en_US: Adds a secret path segment after /gewe. GeWe v2 has no documented webhook signature; this is recommended.
+        zh_Hans: 在 /gewe 后增加一段密钥。GeWe v2 文档没有提供 Webhook 签名校验，建议填写；留空则只使用 LangBot Bot UUID 路由。
+      type: string
+      required: false
+      default: ""
+    - name: callback_url
+      label:
+        en_US: Callback URL Override
+        zh_Hans: 回调地址覆盖（可选）
+      description:
+        en_US: Leave empty to use the generated LangBot webhook URL shown below.
+        zh_Hans: 留空时自动使用下方显示的 LangBot Webhook 地址；只有反向代理地址与 LangBot 配置不同才需要填写。
+      type: string
+      required: false
+      default: ""
+    - name: webhook_url
+      label:
+        en_US: LangBot Webhook URL
+        zh_Hans: LangBot Webhook 地址
+      description:
+        en_US: Copy this URL into the GeWe access-control callback setting.
+        zh_Hans: 复制这个地址，粘贴到 GeWe「访问控制」中的回调地址。GeWe 同一 Token 下的账号会共用回调地址，因此建议一个 LangBot Bot 只使用一个 Token/AppId。
+      type: webhook-url
+      required: false
+      default: ""
+    - name: auto_set_callback
+      label:
+        en_US: Set GeWe Callback Automatically
+        zh_Hans: 自动设置 GeWe 回调地址
+      description:
+        en_US: Call login/setCallback when the adapter starts.
+        zh_Hans: 适配器启动时调用 v2 login/setCallback 设置回调地址；关闭时请手动配置 GeWe 后台。
+      type: boolean
+      required: false
+      default: true
+    - name: timeout
+      label:
+        en_US: API Timeout (seconds)
+        zh_Hans: API 超时（秒）
+      type: integer
+      required: false
+      default: 20
+execution:
+  python:
+    path: ./gewechat_v2.py
+    attr: GeWeV2Adapter
