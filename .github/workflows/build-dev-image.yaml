@@ -7,8 +7,9 @@ on:
 jobs:
   build-dev-image:
     runs-on: ubuntu-latest
-    # 如果是tag则跳过
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    # The Docker Hub credentials belong to the upstream repository. Forks use
+    # their own image workflow instead of failing on every push.
+    if: ${{ github.repository == 'langbot-app/LangBot' && !startsWith(github.ref, 'refs/tags/') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v2

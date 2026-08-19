@@ -1,0 +1,15 @@
+# Image override for sevenfate/LangBot-gewe-v2 deployments.
+# Use together with docker-compose.yaml so data volumes, commands, and networks
+# continue to follow the upstream deployment definition.
+services:
+  langbot_plugin_runtime:
+    image: ghcr.io/sevenfate/langbot-gewe-v2:latest
+
+  langbot_box:
+    image: ghcr.io/sevenfate/langbot-gewe-v2:latest
+
+  langbot:
+    image: ghcr.io/sevenfate/langbot-gewe-v2:latest
+    environment:
+      - BOX__ENABLED=false
+
