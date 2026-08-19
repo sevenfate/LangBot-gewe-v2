@@ -29,13 +29,13 @@ FROM python:3.12.7-slim
 
 WORKDIR /app
 
-COPY . .
-
-COPY --from=node /app/web/dist ./web/dist
-
 # nsjail binary built in the dedicated stage above. Self-contained sandbox
 # backend; lets the Box runtime isolate code without a host Docker socket.
 COPY --from=nsjail-build /usr/local/bin/nsjail /usr/local/bin/nsjail
+
+# Keep the large OS and Python dependency layer independent from application
+# source changes. README.md and LICENSE are required by the project metadata.
+COPY pyproject.toml uv.lock README.md LICENSE ./
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc ca-certificates curl git gnupg \
@@ -62,9 +62,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -f /tmp/nodesource_setup.sh \
     && python -m pip install --no-cache-dir uv \
-    && uv sync \
+    && uv sync --frozen --no-install-project --no-cache \
     && apt-get purge -y --auto-remove curl git gnupg \
     && rm -rf /var/lib/apt/lists/* \
     && touch /.dockerenv
+
+# Source-only changes now invalidate just these small final layers. The second
+# sync installs LangBot itself while reusing the dependency environment above.
+COPY . .
+
+COPY --from=node /app/web/dist ./web/dist
+
+RUN uv sync --frozen --no-cache
 
 CMD [ "uv", "run", "--no-sync", "main.py" ]
